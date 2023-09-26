@@ -1,21 +1,108 @@
 package com.github.quillraven.fleks
 
 import com.github.quillraven.fleks.collection.Bag
+import com.github.quillraven.fleks.collection.BitArray
 import com.github.quillraven.fleks.collection.bag
 import kotlin.math.max
 import kotlin.native.concurrent.ThreadLocal
+
+interface Tracker<T> {
+    val size: Int
+
+    operator fun get(i: Int): T?
+    fun getOrNull(i: Int) : T?
+    operator fun set(i: Int, el: T?)
+
+    fun resize(size: Int)
+}
+
+class ComponentTracker<T>(capacity: Int) : Tracker<T> {
+
+    private var components: Array<T?> = Array<Any?>(capacity) { null } as Array<T?>
+
+    override val size: Int
+        get() = components.size
+
+    override operator fun get(i: Int) = components[i]
+
+    override fun getOrNull(i: Int): T? {
+        if (i !in components.indices) return null
+        return components[i]
+    }
+
+    override fun set(i: Int, el: T?) {
+        components[i] = el
+    }
+
+    override fun resize(size: Int) {
+        components = components.copyOf(size)
+    }
+}
+
+class TagTracker<T>(capacity: Int) : Tracker<T> {
+
+    private val mask: BitArray = BitArray(capacity)
+    private var value: T? = null
+
+    override val size: Int
+        = mask.capacity
+
+    override fun get(i: Int): T? = value?.takeIf { mask[i] }
+
+    override fun getOrNull(i: Int): T? = value?.takeIf { i in 0..<mask.length() && mask[i] }
+
+    override fun resize(size: Int) {
+        if (size > mask.capacity) {
+            mask.set(size - 1)
+            mask.clear(size - 1)
+        }
+    }
+
+    override fun set(i: Int, el: T?) {
+        if (el == null) {
+            mask.clear(i)
+        } else {
+            value ?:let { value = el }
+            mask.set(i)
+        }
+    }
+
+}
+
+interface TrackableType<T> {
+    val id: Int
+    fun getTracker(capacity: Int): Tracker<T>
+}
+
+
+abstract class DefaultTrackableType<T> : TrackableType<T> {
+    override val id: Int = nextId++
+
+    @ThreadLocal
+    companion object {
+        private var nextId = 0
+    }
+}
 
 /**
  * A class that assigns a unique [id] per type of [Component] starting from 0.
  * This [id] is used internally by Fleks as an index for some arrays.
  * Every [Component] class must have at least one [ComponentType].
  */
-abstract class ComponentType<T> {
-    val id: Int = nextId++
+abstract class ComponentType<T> : DefaultTrackableType<T>() {
+    override fun getTracker(capacity: Int) = ComponentTracker<T>(capacity)
+}
 
-    @ThreadLocal
-    companion object {
-        private var nextId = 0
+abstract class TagType<T> : DefaultTrackableType<T>() {
+    override fun getTracker(capacity: Int) = TagTracker<T>(capacity)
+}
+
+
+interface TrackableComponentType<T> : TrackableType<T>, Component<T>
+
+open class TagComponent<T>: TrackableComponentType<T>, TagType<T>() {
+    override fun type(): TrackableType<T> {
+        return this
     }
 }
 
@@ -43,9 +130,9 @@ inline fun <reified T> componentTypeOf(): ComponentType<T> = object : ComponentT
  */
 interface Component<T> {
     /**
-     * Returns the [ComponentType] of a [Component].
+     * Returns the [TrackableType] of a [Component].
      */
-    fun type(): ComponentType<T>
+    fun type(): TrackableType<T>
 
     /**
      * Lifecycle method that gets called whenever a [component][Component] gets set for an [entity][Entity].
@@ -67,8 +154,8 @@ interface Component<T> {
  */
 class ComponentsHolder<T : Component<*>>(
     private val world: World,
-    private val type: ComponentType<*>,
-    private var components: Array<T?>,
+    private val type: TrackableType<*>,
+    private var tracker: Tracker<T>,
 ) {
     /**
      * Sets the [component] for the given [entity]. This function is only
@@ -87,21 +174,21 @@ class ComponentsHolder<T : Component<*>>(
      * will be called.
      */
     operator fun set(entity: Entity, component: T) {
-        if (entity.id >= components.size) {
+        if (entity.id >= tracker.size) {
             // not enough space to store the new component -> resize array
-            components = components.copyOf(max(components.size * 2, entity.id + 1))
+            tracker.resize(max(tracker.size * 2, entity.id + 1))
         }
 
         // check if the remove lifecycle method of the previous component needs to be called
-        components[entity.id]?.run {
+        tracker[entity.id]?.run {
             // assign current component to null in order for 'contains' calls inside the lifecycle
             // method to correctly return false
-            components[entity.id] = null
+            tracker[entity.id] = null
             world.onRemove(entity)
         }
 
         // set component and call lifecycle method
-        components[entity.id] = component
+        tracker[entity.id] = component
         component.run { world.onAdd(entity) }
     }
 
@@ -113,11 +200,11 @@ class ComponentsHolder<T : Component<*>>(
      * @throws [IndexOutOfBoundsException] if the id of the [entity] exceeds the components' capacity.
      */
     operator fun minusAssign(entity: Entity) {
-        if (entity.id < 0 || entity.id >= components.size) throw IndexOutOfBoundsException("$entity.id is not valid for components of size ${components.size}")
+        if (entity.id < 0 || entity.id >= tracker.size) throw IndexOutOfBoundsException("$entity.id is not valid for components of size ${tracker.size}")
 
-        val existingCmp = components[entity.id]
+        val existingCmp = tracker[entity.id]
         // assign null before running the lifecycle method in order for 'contains' calls to correctly return false
-        components[entity.id] = null
+        tracker[entity.id] = null
         existingCmp?.run { world.onRemove(entity) }
     }
 
@@ -127,20 +214,20 @@ class ComponentsHolder<T : Component<*>>(
      * @throws [FleksNoSuchEntityComponentException] if the [entity] does not have such a component.
      */
     operator fun get(entity: Entity): T {
-        return components[entity.id] ?: throw FleksNoSuchEntityComponentException(entity, componentName())
+        return tracker[entity.id] ?: throw FleksNoSuchEntityComponentException(entity, componentName())
     }
 
     /**
      * Returns a component of the specific type of the given [entity] or null if the entity does not have such a component.
      */
     fun getOrNull(entity: Entity): T? =
-        components.getOrNull(entity.id)
+        tracker.getOrNull(entity.id)
 
     /**
      * Returns true if and only if the given [entity] has a component of the specific type.
      */
     operator fun contains(entity: Entity): Boolean =
-        components.size > entity.id && components[entity.id] != null
+        tracker.size > entity.id && tracker[entity.id] != null
 
     /**
      * Returns the simplified component name of a [ComponentType].
@@ -173,10 +260,10 @@ class ComponentService {
      * used by [World.loadSnapshot] where we don't have the correct type information
      * during runtime, and therefore we can only provide '*' as a type and need to cast it internally.
      */
-    fun wildcardHolder(componentType: ComponentType<*>): ComponentsHolder<*> {
+    fun wildcardHolder(componentType: TrackableType<*>): ComponentsHolder<*> {
         if (holdersBag.hasNoValueAtIndex(componentType.id)) {
             holdersBag[componentType.id] =
-                ComponentsHolder(world, componentType, Array<Component<*>?>(world.capacity) { null })
+                ComponentsHolder(world, componentType, componentType.getTracker(world.capacity) as Tracker<Component<*>>)
         }
         return holdersBag[componentType.id]
     }
@@ -186,9 +273,9 @@ class ComponentService {
      * will be created and added to the [holdersBag].
      */
     @Suppress("UNCHECKED_CAST")
-    inline fun <reified T : Component<*>> holder(componentType: ComponentType<T>): ComponentsHolder<T> {
+    inline fun <reified T : Component<*>> holder(componentType: TrackableType<T>): ComponentsHolder<T> {
         if (holdersBag.hasNoValueAtIndex(componentType.id)) {
-            holdersBag[componentType.id] = ComponentsHolder(world, componentType, Array<T?>(world.capacity) { null })
+            holdersBag[componentType.id] = ComponentsHolder(world, componentType, componentType.getTracker(world.capacity))
         }
         return holdersBag[componentType.id] as ComponentsHolder<T>
     }

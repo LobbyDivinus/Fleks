@@ -36,32 +36,32 @@ abstract class EntityComponentContext(
      *
      * @throws [FleksNoSuchEntityComponentException] if the [entity][Entity] does not have such a component.
      */
-    inline operator fun <reified T : Component<*>> Entity.get(type: ComponentType<T>): T =
+    inline operator fun <reified T : Component<*>> Entity.get(type: TrackableType<T>): T =
         componentService.holder(type)[this]
 
     /**
      * Returns a [component][Component] of the given [type] for the [entity][Entity]
      * or null if the [entity][Entity] does not have such a [component][Component].
      */
-    inline fun <reified T : Component<*>> Entity.getOrNull(type: ComponentType<T>): T? =
+    inline fun <reified T : Component<*>> Entity.getOrNull(type: TrackableType<T>): T? =
         componentService.holder(type).getOrNull(this)
 
     /**
      * Returns true if and only if the [entity][Entity] has a [component][Component] of the given [type].
      */
-    inline operator fun <reified T : Component<*>> Entity.contains(type: ComponentType<T>): Boolean =
+    inline operator fun <reified T : Component<*>> Entity.contains(type: TrackableType<T>): Boolean =
         this in componentService.holder(type)
 
     /**
      * Returns true if and only if the [entity][Entity] has a [component][Component] of the given [type].
      */
-    inline infix fun <reified T : Component<*>> Entity.has(type: ComponentType<T>): Boolean =
+    inline infix fun <reified T : Component<*>> Entity.has(type: TrackableType<T>): Boolean =
         this in componentService.holder(type)
 
     /**
      * Returns true if and only if the [entity][Entity] doesn't have a [component][Component] of the given [type].
      */
-    inline infix fun <reified T : Component<*>> Entity.hasNo(type: ComponentType<T>): Boolean =
+    inline infix fun <reified T : Component<*>> Entity.hasNo(type: TrackableType<T>): Boolean =
         this !in componentService.holder(type)
 
     /**
@@ -110,7 +110,7 @@ open class EntityCreateContext(
      * lifecycle method is called on the new component.
      */
     inline operator fun <reified T : Component<T>> Entity.plusAssign(component: T) {
-        val compType: ComponentType<T> = component.type()
+        val compType: TrackableType<T> = component.type()
         compMasks[this.id].set(compType.id)
         val holder: ComponentsHolder<T> = componentService.holder(compType)
         holder[this] = component
@@ -154,7 +154,7 @@ class EntityUpdateContext(
      * @throws [IndexOutOfBoundsException] if the id of the [entity][Entity] exceeds the internal components' capacity.
      * This can only happen when the [entity][Entity] never had such a component.
      */
-    inline operator fun <reified T : Component<*>> Entity.minusAssign(type: ComponentType<T>) {
+    inline operator fun <reified T : Component<*>> Entity.minusAssign(type: TrackableType<T>) {
         compMasks[this.id].clear(type.id)
         componentService.holder(type) -= this
     }
@@ -166,7 +166,7 @@ class EntityUpdateContext(
      * to assign it to the [entity][Entity] and return it.
      */
     inline fun <reified T : Component<T>> Entity.getOrAdd(
-        type: ComponentType<T>,
+        type: TrackableType<T>,
         add: () -> T,
     ): T {
         val holder: ComponentsHolder<T> = componentService.holder(type)
